@@ -10,7 +10,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from scrapper import run_fnc
 from aiogram import types, Router
+from pathlib import Path
 from tokens import *
+
+import json
+
+data = {"interval": 100}
+
+try:
+    with open("interval.json", "x", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+except FileExistsError:
+    pass  # file exists → do nothing
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -27,12 +38,17 @@ class AddURL(StatesGroup):
     times = State()
 
 
+class GiveInterval(StatesGroup):
+    interval = State()
+
+
 # ---------- KEYBOARD ----------
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Link Qo'shish")],
         [KeyboardButton(text="▶️ Start")],
-        [KeyboardButton(text="👁️ Linklarni ko'rish")],
+        [KeyboardButton(text="👁️ Linklarni ko'rish"),
+         KeyboardButton(text="⏰ Vaqt intervalni o'zgartirish")],
         [KeyboardButton(text="🗑️ Linklarni tozalash")]
     ],
     resize_keyboard=True
@@ -46,6 +62,15 @@ keyboard = ReplyKeyboardMarkup(
 def clear_data():
     with open(DATA_FILE, "w") as f:
         json.dump([], f)
+
+def update_interval(x):
+    with open('interval.json', 'w') as f:
+        json.dump({'interval':x}, f, indent=4)
+
+def get_interval_number():
+    with open('interval.json', 'r') as f:
+        data = json.load(f)
+        return data['interval']
 
 
 def load_data():
@@ -104,6 +129,25 @@ async def add_url(msg: types.Message, state: FSMContext):
     await msg.answer(textify_data())
 
 
+@dp.message(lambda m: m.text == "⏰ Vaqt intervalni o'zgartirish")
+async def add_url(msg: types.Message, state: FSMContext):
+    await msg.answer("Click vaqti oralig'ini yozing (sekundlarda):")
+    await state.set_state(GiveInterval.interval)
+
+@dp.message(GiveInterval.interval)
+async def get_interval(msg: types.Message, state: FSMContext):
+    try:
+        number = int(msg.text)
+        await state.update_data(interval = msg.text)
+        update_interval(number)
+        await msg.answer(f"Clicklar oralig'i {number} daqiqaga o'zgartirildi ✅")
+    except:
+        await msg.answer("Iltimos faqat raqam kirgizing!:")
+        await state.set_state(GiveInterval.interval)
+        return
+
+
+
 @dp.message(AddURL.url)
 async def get_url(msg: types.Message, state: FSMContext):
     await state.update_data(url=msg.text)
@@ -126,25 +170,35 @@ async def get_times(msg: types.Message, state: FSMContext):
 
 @dp.message(lambda m: m.text == "▶️ Start")
 async def run_handler(msg: types.Message):
-    mssg = await msg.answer("Boshlanmoqda...")
-
     data_list = load_data()
+    loop = asyncio.get_running_loop()
 
-    for i, data in enumerate(data_list, start=1):
-        if i == 1:
-                    await mssg.edit_text(
-                        f"{i}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n{show_stats(i-1, len(data_list))}"
-                    )
+    for idx, data in enumerate(data_list, start=1):
+        # 🆕 new message for THIS data
+        progress_msg = await msg.answer(
+            f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n0/{data['times']}\n\n{show_stats(0, data['times'])}"
+        )
+
+        async def update(iteration, total):
+            await progress_msg.edit_text(
+                f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n"
+                f"{iteration}/{total}\n\n"
+                f"{show_stats(iteration, total)}"
+            )
+
+        def progress_callback(iteration, total):
+            asyncio.run_coroutine_threadsafe(
+                update(iteration, total),
+                loop
+            )
+
         await asyncio.to_thread(
             run_fnc,
             data["url"],
-            data["times"]
+            data["times"],
+            get_interval_number(),
+            progress_callback
         )
-        await mssg.edit_text(
-            f"{i}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n{show_stats(i, len(data_list))}"
-        )
-
-        # 🔑 RUN SELENIUM IN THREAD
 
     clear_data()
     await msg.answer("Vazifa bajarildi ✅")
