@@ -45,8 +45,11 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             
             time.sleep(2)
             print(f"[{visit_id}] Using proxy {proxy['host']}")
-            r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
-            print("Proxy IP:", r.text)
+            try:
+                r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
+                print("Proxy IP:", r.text)
+            except:
+                print("IP could not be identified!")
 
             sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
