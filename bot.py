@@ -140,7 +140,7 @@ async def get_interval(msg: types.Message, state: FSMContext):
         number = int(msg.text)
         await state.update_data(interval = msg.text)
         update_interval(number)
-        await msg.answer(f"Clicklar oralig'i {number} daqiqaga o'zgartirildi ✅")
+        await msg.answer(f"Clicklar oralig'i {number} soniyaga o'zgartirildi ✅")
     except:
         await msg.answer("Iltimos faqat raqam kirgizing!:")
         await state.set_state(GiveInterval.interval)
@@ -158,7 +158,7 @@ async def get_url(msg: types.Message, state: FSMContext):
 @dp.message(AddURL.times)
 async def get_times(msg: types.Message, state: FSMContext):
     if not msg.text.isdigit():
-        await msg.answer("Send a number.")
+        await msg.answer("Iltimos butun son jo'nating.")
         return
 
     data = await state.get_data()
