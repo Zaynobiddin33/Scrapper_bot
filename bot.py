@@ -15,6 +15,7 @@ from tokens import *
 
 import json
 
+
 data = {"interval": 100}
 
 try:
@@ -141,11 +142,11 @@ async def get_interval(msg: types.Message, state: FSMContext):
         await state.update_data(interval = msg.text)
         update_interval(number)
         await msg.answer(f"Clicklar oralig'i {number} soniyaga o'zgartirildi ✅")
+        await state.clear()
     except:
         await msg.answer("Iltimos faqat raqam kirgizing!:")
         await state.set_state(GiveInterval.interval)
         return
-
 
 
 @dp.message(AddURL.url)

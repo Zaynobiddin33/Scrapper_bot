@@ -6,6 +6,8 @@ import sys
 import requests
 from tokens import *
 from datetime import datetime
+import uuid
+import subprocess
 
 PROXIES = [
     {
@@ -16,12 +18,27 @@ PROXIES = [
     },
     # add more proxies here
 ]
-prxy = f"http://{PROXIES[0]['username']}:{PROXIES[0]['password']}@{PROXIES[0]['host']}:{PROXIES[0]['port']}"
 
-prxys = {
-    'http': prxy,
-    'https': prxy
-}
+
+def cleanup_chrome():
+    subprocess.run(
+        ["pkill", "-f", "chrome"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+def new_session():
+    return uuid.uuid4().hex[:8]
+
+def sticky_proxy():
+    session_id = uuid.uuid4().hex[:8]
+    return {
+        "host": PROXY_HOST,
+        "port": PROXY_PORT,
+        "username": f"{USERNAME}_session-{session_id}",
+        "password": PASSWORD,
+    }
+
 
 MAX_RETRIES_PER_PROXY = 1
 
@@ -40,11 +57,20 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             headless=False,      # safer for captchas
             page_load_strategy="eager",
             test=True,
+            chromium_arg="--no-sandbox --disable-dev-shm-usage --disable-gpu",
             
         ) as sb:
-            
-            time.sleep(2)
+            is_success = False
+            time.sleep(1)
             print(f"[{visit_id}] Using proxy {proxy['host']}")
+
+            prxy = f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+
+            prxys = {
+                'http': prxy,
+                'https': prxy
+            }
+
             try:
                 r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
                 print("Proxy IP:", r.text)
@@ -64,7 +90,8 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             sb.sleep(3)
 
             # Replace sb.open(target) with this:
-            sb.uc_open_with_reconnect(target, reconnect_time=5)
+            sb.open(target)
+
             try:
                 if sb.wait_for_element_present("iframe", timeout=15):
                     print("Iframe detected, checking for captcha...")
@@ -78,7 +105,7 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             except:
                 pass
 
-            time.sleep(10)
+            time.sleep(5)
 
 
             sb.uc_gui_click_captcha()
@@ -89,8 +116,7 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
 
             if "404" in sb.get_page_title():
                 print(f"[{visit_id}] Detected 404 Block. Attempting refresh...")
-                sb.sleep(2)
-                sb.refresh()
+                return False
 
             # CAPTCHA handling
 
@@ -109,6 +135,13 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             time.sleep(2)
 
 
+            try:
+                r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
+                print("Proxy IP2:", r.text)
+            except:
+                print("IP could not be identified!")
+
+
             # Extra check after CAPTCHA
             if "captcha" in sb.get_current_url().lower():
                 print(f"[{visit_id}] CAPTCHA redirect detected")
@@ -118,7 +151,11 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             # Final validation
             if sb.get_current_url():
                 print(f"[{visit_id}] Visit successful")
-                return True
+                is_success = True
+
+            sb.driver.quit()
+            print('quitted')
+            return is_success
     except Exception as e:
         print(f"[{visit_id}] Error: {e}")
 
@@ -130,23 +167,18 @@ def run_fnc(url, visits, interval, on_process):
 
     for i in range(visits):
         start = datetime.now()
-        proxy = PROXIES[0]
+        proxy = sticky_proxy()
 
-        for attempt in range(MAX_RETRIES_PER_PROXY):
-            success = visit_with_proxy(proxy, url, visit_count)
+        success = visit_with_proxy(proxy, url, visit_count)
+        visit_count+=1
+        time.sleep(random.uniform(1.5, 3.0))
 
-            if success:
-                visit_count += 1
-                break
-
-            print(f"[{visit_count}] Retrying with new proxy...")
-            proxy = random.choice(PROXIES)
-            time.sleep(random.uniform(1.5, 3.0))
         end = datetime.now()
         on_process(i+1, visits)
-        remain = int(interval-(end-start).total_seconds())
-        for i in range(remain):
-            sys.stdout.write(f'\r{remain-i} remaining')
-            sys.stdout.flush()
-            time.sleep(1)
+        remain = int(interval-(end-start).total_seconds()) if int(interval-(end-start).total_seconds())>0 else 0
+        print(f'sleeping {remain} seconds')
+        time.sleep(remain)
+        if (i+1) % 5 == 0:
+            print("another 5th step done: cleaning chrome")
+            cleanup_chrome()
         
