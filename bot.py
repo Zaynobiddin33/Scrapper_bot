@@ -13,8 +13,22 @@ from aiogram import types, Router
 from pathlib import Path
 from scrapper import run_fnc, set_stop_flag, cleanup_chrome
 from tokens import *
-
 import json
+
+  # without @
+
+def authorized(func):
+    """Decorator to allow only a specific username"""
+    async def wrapper(msg_or_cb, *args, **kwargs):
+        username = getattr(msg_or_cb.from_user, "username", None)
+        if username not in AUTHORIZED_USERNAMES:
+            if isinstance(msg_or_cb, types.Message):
+                await msg_or_cb.answer("Sizni bu botdan foydalanish huquqingiz yo'q ❌")
+            elif isinstance(msg_or_cb, types.CallbackQuery):
+                await msg_or_cb.answer("Sizni bu botdan foydalanish huquqingiz yo'q ❌", show_alert=True)
+            return
+        return await func(msg_or_cb, *args, **kwargs)
+    return wrapper
 
 
 data = {"interval": 100}
@@ -121,26 +135,31 @@ def show_stats(done, all):
 
 # ---------- HANDLERS ----------
 @dp.message(CommandStart())
+@authorized
 async def start(msg: types.Message):
     await msg.answer("Salom, Vazifa tanlang:", reply_markup=keyboard)
 
 
 @dp.message(lambda m: m.text == "➕ Link Qo'shish")
+@authorized
 async def add_url(msg: types.Message, state: FSMContext):
     await msg.answer("Link yuboring:")
     await state.set_state(AddURL.url)
 
 @dp.message(lambda m: m.text == "👁️ Linklarni ko'rish")
+@authorized
 async def add_url(msg: types.Message, state: FSMContext):
     await msg.answer(textify_data())
 
 
 @dp.message(lambda m: m.text == "⏰ Vaqt intervalni o'zgartirish")
+@authorized
 async def add_url(msg: types.Message, state: FSMContext):
     await msg.answer("Click vaqti oralig'ini yozing (sekundlarda):")
     await state.set_state(GiveInterval.interval)
 
 @dp.message(GiveInterval.interval)
+@authorized
 async def get_interval(msg: types.Message, state: FSMContext):
     try:
         number = int(msg.text)
@@ -155,6 +174,7 @@ async def get_interval(msg: types.Message, state: FSMContext):
 
 
 @dp.message(AddURL.url)
+@authorized
 async def get_url(msg: types.Message, state: FSMContext):
     await state.update_data(url=msg.text)
     await msg.answer("Bu link'ga necha marta kirilsin?")
@@ -162,6 +182,7 @@ async def get_url(msg: types.Message, state: FSMContext):
 
 
 @dp.message(AddURL.times)
+@authorized
 async def get_times(msg: types.Message, state: FSMContext):
     if not msg.text.isdigit():
         await msg.answer("Iltimos butun son jo'nating.")
@@ -175,6 +196,7 @@ async def get_times(msg: types.Message, state: FSMContext):
 
 
 @dp.message(lambda m: m.text == "▶️ Start")
+@authorized
 async def run_handler(msg: types.Message):
     data_list = load_data()
     loop = asyncio.get_running_loop()
@@ -246,6 +268,7 @@ async def stop_callback_handler(callback: types.CallbackQuery):
 
 
 @dp.message(lambda m: m.text == "🗑️ Linklarni tozalash")
+@authorized
 async def clear_urls_handler(msg: types.Message):
     yes_no_kb = InlineKeyboardMarkup(
     inline_keyboard=[
