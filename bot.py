@@ -15,19 +15,18 @@ from scrapper import run_fnc, set_stop_flag, cleanup_chrome
 from tokens import *
 import json
 
-  # without @
-
 def authorized(func):
-    """Decorator to allow only a specific username"""
     async def wrapper(msg_or_cb, *args, **kwargs):
+        # Get username safely
         username = getattr(msg_or_cb.from_user, "username", None)
         if username not in AUTHORIZED_USERNAMES:
             if isinstance(msg_or_cb, types.Message):
-                await msg_or_cb.answer("Sizni bu botdan foydalanish huquqingiz yo'q ❌")
+                await msg_or_cb.answer("Siz bu botni ishlata olmaysiz ❌")
             elif isinstance(msg_or_cb, types.CallbackQuery):
-                await msg_or_cb.answer("Sizni bu botdan foydalanish huquqingiz yo'q ❌", show_alert=True)
+                await msg_or_cb.answer("Siz bu botni ishlata olmaysiz ❌", show_alert=True)
             return
-        return await func(msg_or_cb, *args, **kwargs)
+        # Call original handler safely, ignore extra kwargs
+        return await func(msg_or_cb, *args)
     return wrapper
 
 
