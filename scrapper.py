@@ -9,6 +9,19 @@ from datetime import datetime
 import uuid
 import subprocess
 
+def set_stop_flag(value: bool):
+    global STOP_FLAG
+    STOP_FLAG = value
+
+def cleanup_chrome():
+    import psutil
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if "chrome" in proc.info['name'].lower() or "driver" in proc.info['name'].lower():
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
 PROXIES = [
     {
         "host": PROXY_HOST,
@@ -18,15 +31,6 @@ PROXIES = [
     },
     # add more proxies here
 ]
-
-
-def cleanup_chrome():
-    subprocess.run(
-        ["pkill", "-f", "chrome"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
 def new_session():
     return uuid.uuid4().hex[:8]
 
@@ -57,28 +61,17 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
             headless=False,      # safer for captchas
             page_load_strategy="eager",
             test=True,
-            chromium_arg="--no-sandbox --disable-dev-shm-usage --disable-gpu",
             
         ) as sb:
+            if STOP_FLAG: return
             is_success = False
             time.sleep(1)
             print(f"[{visit_id}] Using proxy {proxy['host']}")
-
-            prxy = f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
-
-            prxys = {
-                'http': prxy,
-                'https': prxy
-            }
-
-            try:
-                r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
-                print("Proxy IP:", r.text)
-            except:
-                print("IP could not be identified!")
+    
+            if STOP_FLAG: return
 
             sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
+            if STOP_FLAG: return
             # Before   sb.open(), set the referer
             sb.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
                 "headers": {
@@ -86,11 +79,16 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
                     "Accept-Language": "uz-UZ,uz;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6,en;q=0.5"
                 }
             })
+
+            if STOP_FLAG: return
             sb.activate_cdp_mode("https://yandex.uz")
             sb.sleep(3)
 
+            if STOP_FLAG: return
             # Replace sb.open(target) with this:
             sb.open(target)
+
+            if STOP_FLAG: return
 
             try:
                 if sb.wait_for_element_present("iframe", timeout=15):
@@ -104,16 +102,19 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
                     sb.uc_gui_click_captcha()
             except:
                 pass
-
+            
+            if STOP_FLAG: return
             time.sleep(5)
 
-
+            if STOP_FLAG: return
             sb.uc_gui_click_captcha()
 
+            if STOP_FLAG: return
             # Handle redirects (captcha pages often redirect)
             current_url = sb.get_current_url()
             print(f"[{visit_id}] Landed on: {current_url}")
 
+            if STOP_FLAG: return
             if "404" in sb.get_page_title():
                 print(f"[{visit_id}] Detected 404 Block. Attempting refresh...")
                 return False
@@ -124,22 +125,19 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
                 sys.stdout.write(f"\rProgress: {5-i}")
                 sys.stdout.flush()
                 time.sleep(1)
-
+            
+            if STOP_FLAG: return
             sb.execute_script("window.scrollBy(0,200)")
             time.sleep(1)
+            if STOP_FLAG: return
             sb.execute_script("window.scrollBy(0,400)")
             time.sleep(0.5)
+            if STOP_FLAG: return
             sb.execute_script("window.scrollBy(0,600)")
             time.sleep(2)
+            if STOP_FLAG: return
             sb.execute_script("window.scrollBy(0,400)")
             time.sleep(2)
-
-
-            try:
-                r = requests.get("http://api.ipify.org", proxies=prxys, timeout=10)
-                print("Proxy IP2:", r.text)
-            except:
-                print("IP could not be identified!")
 
 
             # Extra check after CAPTCHA
@@ -153,9 +151,8 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
                 print(f"[{visit_id}] Visit successful")
                 is_success = True
 
-            sb.driver.quit()
-            print('quitted')
             return is_success
+        
     except Exception as e:
         print(f"[{visit_id}] Error: {e}")
 
@@ -163,22 +160,41 @@ def visit_with_proxy(proxy: dict, target, visit_id: int) -> bool:
 
 
 def run_fnc(url, visits, interval, on_process):
+    global STOP_FLAG
     visit_count = 1
+    STOP_FLAG = False  # Reset flag
 
     for i in range(visits):
+        if STOP_FLAG: break # Stop outer loop
+
         start = datetime.now()
         proxy = sticky_proxy()
 
         success = visit_with_proxy(proxy, url, visit_count)
         visit_count+=1
+        
+        # Smart Sleep
         time.sleep(random.uniform(1.5, 3.0))
 
         end = datetime.now()
         on_process(i+1, visits)
-        remain = int(interval-(end-start).total_seconds()) if int(interval-(end-start).total_seconds())>0 else 0
+        
+        elapsed = (end - start).total_seconds()
+        remain = int(interval - elapsed) if int(interval - elapsed) > 0 else 0
+        
         print(f'sleeping {remain} seconds')
-        time.sleep(remain)
-        if (i+1) % 5 == 0:
+        
+        # Instant Stop during sleep
+        for _ in range(remain):
+            if STOP_FLAG:
+                print("Stopped: cleaning chrome up")
+                cleanup_chrome()
+                return
+            time.sleep(1)
+        if (i+1) % 3 == 0:
             print("another 5th step done: cleaning chrome")
             cleanup_chrome()
         
+        if STOP_FLAG:
+            break
+    cleanup_chrome()

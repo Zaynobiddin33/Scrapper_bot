@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from scrapper import run_fnc
 from aiogram import types, Router
 from pathlib import Path
+from scrapper import run_fnc, set_stop_flag, cleanup_chrome
 from tokens import *
 
 import json
@@ -54,6 +55,10 @@ keyboard = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+stop_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🛑 STOP", callback_data="stop_process")]
+])
 
 
 # ---------- UTILS ----------
@@ -174,18 +179,30 @@ async def run_handler(msg: types.Message):
     data_list = load_data()
     loop = asyncio.get_running_loop()
 
+    # Reset the stop flag before starting
+    set_stop_flag(False)
+
     for idx, data in enumerate(data_list, start=1):
-        # 🆕 new message for THIS data
+        
+        # Check if stopped before starting the next link in the list
+        # (You might need to access the flag here or handle the break logic)
+        
         progress_msg = await msg.answer(
-            f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n0/{data['times']}\n\n{show_stats(0, data['times'])}"
+            f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n0/{data['times']}\n\n{show_stats(0, data['times'])}",
+            reply_markup=stop_kb # <--- Add the button here
         )
 
         async def update(iteration, total):
-            await progress_msg.edit_text(
-                f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n"
-                f"{iteration}/{total}\n\n"
-                f"{show_stats(iteration, total)}"
-            )
+            # Wrap in try/except because editing a message might fail if user blocked bot or message is too old
+            try:
+                await progress_msg.edit_text(
+                    f"{idx}/{len(data_list)} linkga {data['times']} marta kirilmoqda...\n\n"
+                    f"{iteration}/{total}\n\n"
+                    f"{show_stats(iteration, total)}",
+                    reply_markup=stop_kb
+                )
+            except:
+                pass
 
         def progress_callback(iteration, total):
             asyncio.run_coroutine_threadsafe(
@@ -193,6 +210,7 @@ async def run_handler(msg: types.Message):
                 loop
             )
 
+        # Run the scrapper
         await asyncio.to_thread(
             run_fnc,
             data["url"],
@@ -200,9 +218,32 @@ async def run_handler(msg: types.Message):
             get_interval_number(),
             progress_callback
         )
+        
+        # Optional: Remove the stop button when this specific task is done
+        try:
+            await progress_msg.edit_reply_markup(reply_markup=None)
+        except:
+            pass
 
     clear_data()
-    await msg.answer("Vazifa bajarildi ✅")
+    await msg.answer("Vazifa bajarildi (yoki to'xtatildi) ✅")
+
+
+# 2. Add the Callback Handler for the Stop Button
+@dp.callback_query(lambda c: c.data == "stop_process")
+async def stop_callback_handler(callback: types.CallbackQuery):
+    # Set the flag in scrapper.py to True
+    set_stop_flag(True)
+    
+    await callback.answer("Protsess to'xtatilmoqda...", show_alert=True)
+    await callback.message.edit_text(
+        callback.message.text + "\n\n🛑 <b>JARAYON TO'XTATILDI!</b>",
+        parse_mode="HTML"
+    )
+    
+    # Force cleanup immediately
+    cleanup_chrome()
+
 
 @dp.message(lambda m: m.text == "🗑️ Linklarni tozalash")
 async def clear_urls_handler(msg: types.Message):
