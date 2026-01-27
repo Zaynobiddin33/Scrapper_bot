@@ -140,25 +140,25 @@ async def start(msg: types.Message):
 
 
 @dp.message(lambda m: m.text == "➕ Link Qo'shish")
-@authorized
 async def add_url(msg: types.Message, state: FSMContext):
-    await msg.answer("Link yuboring:")
-    await state.set_state(AddURL.url)
+    if msg.from_user.username in AUTHORIZED_USERNAMES:
+        await msg.answer("Link yuboring:")
+        await state.set_state(AddURL.url)
+    else:
+        pass
 
 @dp.message(lambda m: m.text == "👁️ Linklarni ko'rish")
 @authorized
-async def add_url(msg: types.Message, state: FSMContext):
+async def see_url(msg: types.Message):
     await msg.answer(textify_data())
 
 
 @dp.message(lambda m: m.text == "⏰ Vaqt intervalni o'zgartirish")
-@authorized
 async def add_url(msg: types.Message, state: FSMContext):
     await msg.answer("Click vaqti oralig'ini yozing (sekundlarda):")
     await state.set_state(GiveInterval.interval)
 
 @dp.message(GiveInterval.interval)
-@authorized
 async def get_interval(msg: types.Message, state: FSMContext):
     try:
         number = int(msg.text)
@@ -173,15 +173,16 @@ async def get_interval(msg: types.Message, state: FSMContext):
 
 
 @dp.message(AddURL.url)
-@authorized
 async def get_url(msg: types.Message, state: FSMContext):
-    await state.update_data(url=msg.text)
-    await msg.answer("Bu link'ga necha marta kirilsin?")
-    await state.set_state(AddURL.times)
+    if msg.from_user.username in AUTHORIZED_USERNAMES:
+        await state.update_data(url=msg.text)
+        await msg.answer("Bu link'ga necha marta kirilsin?")
+        await state.set_state(AddURL.times)
+    else: 
+        pass
 
 
 @dp.message(AddURL.times)
-@authorized
 async def get_times(msg: types.Message, state: FSMContext):
     if not msg.text.isdigit():
         await msg.answer("Iltimos butun son jo'nating.")
