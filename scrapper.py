@@ -14,13 +14,14 @@ def set_stop_flag(value: bool):
     STOP_FLAG = value
 
 def cleanup_chrome():
-    import psutil
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            if "chrome" in proc.info['name'].lower() or "driver" in proc.info['name'].lower():
-                proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    # import psutil
+    # for proc in psutil.process_iter(['pid', 'name']):
+    #     try:
+    #         if "chrome" in proc.info['name'].lower() or "driver" in proc.info['name'].lower():
+    #             proc.kill()
+    #     except (psutil.NoSuchProcess, psutil.AccessDenied):
+    #         pass
+    pass
 
 PROXIES = [
     {
