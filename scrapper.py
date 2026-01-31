@@ -213,8 +213,3 @@ def run_fnc(url, visits, interval, on_process):
         if STOP_FLAG:
             break
     cleanup_chrome()
-
-
-for i in range(10):
-    time.sleep(3)
-    diminish()
