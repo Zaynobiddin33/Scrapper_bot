@@ -8,10 +8,21 @@ from tokens import *
 from datetime import datetime
 import uuid
 import subprocess
+import json
 
 def set_stop_flag(value: bool):
     global STOP_FLAG
     STOP_FLAG = value
+
+def diminish():
+    with open('data.json', 'r') as f:
+        data = json.load(f)
+    if data[0]['times']>1 :
+        data[0]['times']-=1
+    else:
+        data = data[1:]
+    with open('data.json', 'w') as f:
+        json.dump(data, f, indent=2)
 
 def cleanup_chrome():
     # import psutil
@@ -192,10 +203,18 @@ def run_fnc(url, visits, interval, on_process):
                 cleanup_chrome()
                 return
             time.sleep(1)
+        
+        diminish()
+
         if (i+1) % 3 == 0:
-            print("another 5th step done: cleaning chrome")
+            print("another 3rd step done: cleaning chrome")
             cleanup_chrome()
         
         if STOP_FLAG:
             break
     cleanup_chrome()
+
+
+for i in range(10):
+    time.sleep(3)
+    diminish()

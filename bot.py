@@ -14,6 +14,9 @@ from pathlib import Path
 from scrapper import run_fnc, set_stop_flag, cleanup_chrome
 from tokens import *
 import json
+import subprocess
+
+RESTART_FLAG = Path("/tmp/bot_restarting")
 
 def authorized(func):
     async def wrapper(msg_or_cb, *args, **kwargs):
@@ -64,7 +67,10 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="▶️ Start")],
         [KeyboardButton(text="👁️ Linklarni ko'rish"),
          KeyboardButton(text="⏰ Vaqt intervalni o'zgartirish")],
-        [KeyboardButton(text="🗑️ Linklarni tozalash")]
+        [KeyboardButton(text="🗑️ Linklarni tozalash"),
+        KeyboardButton(text="🔄 Restart"),
+         
+         ]
     ],
     resize_keyboard=True
 )
@@ -121,6 +127,25 @@ def count_links():
     return len(data)
 
 
+def save_id(user_id):
+    path = Path("ids.json")
+    if not path.exists():
+        path.write_text("[]")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if user_id not in data:
+        data.append(user_id)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+def load_id():
+    path = Path("ids.json")
+    if not path.exists():
+        return []
+    with open('ids.json', 'r') as f:
+        data = json.load(f)
+        return data
+
 # ---------- YOUR FUNCTION ----------
 def show_stats(done, all):
     if not done == 0:
@@ -136,6 +161,7 @@ def show_stats(done, all):
 @dp.message(CommandStart())
 @authorized
 async def start(msg: types.Message):
+    save_id(msg.from_user.id)
     await msg.answer("Salom, Vazifa tanlang:", reply_markup=keyboard)
 
 
@@ -152,6 +178,27 @@ async def add_url(msg: types.Message, state: FSMContext):
 async def see_url(msg: types.Message):
     await msg.answer(textify_data())
 
+
+@dp.message(lambda m: m.text == "🔄 Restart")
+async def restart_bot(msg: types.Message):
+    await msg.answer("🔄 Bot qayta yuklanmoqda, iltimos kuting...")
+
+    RESTART_FLAG.write_text("1")
+
+    subprocess.Popen(
+        ["systemctl", "restart", f"{SERVICE_NAME}.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+async def on_startup(bot):
+    if RESTART_FLAG.exists():
+        RESTART_FLAG.unlink()
+        for admin_id in load_id():
+            await bot.send_message(
+                admin_id,
+                "✅ Bot qayta yuklandi, foydalanishingiz mumkin"
+            )
 
 @dp.message(lambda m: m.text == "⏰ Vaqt intervalni o'zgartirish")
 async def add_url(msg: types.Message, state: FSMContext):
@@ -247,7 +294,6 @@ async def run_handler(msg: types.Message):
         except:
             pass
 
-    clear_data()
     await msg.answer("Vazifa bajarildi (yoki to'xtatildi) ✅")
 
 

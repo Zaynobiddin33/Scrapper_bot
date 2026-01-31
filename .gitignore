@@ -4,3 +4,4 @@ env
 downloaded_files
 __pycache__
 interval.json
+ids.json
