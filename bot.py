@@ -336,7 +336,7 @@ async def process_callback(callback: types.CallbackQuery):
 
 # ---------- START ----------
 async def main():
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, on_startup=on_startup)
 
 
 if __name__ == "__main__":
