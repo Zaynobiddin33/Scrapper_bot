@@ -186,9 +186,9 @@ async def restart_bot(msg: types.Message):
     RESTART_FLAG.write_text("1")
 
     subprocess.Popen(
-        ["systemctl", "restart", f"{SERVICE_NAME}.service"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+    ["bash", "-c", f"systemctl kill -s SIGKILL {SERVICE_NAME}.service && systemctl start {SERVICE_NAME}.service"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
     )
 
 async def on_startup(bot):
