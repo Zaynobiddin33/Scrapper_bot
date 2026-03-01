@@ -10,6 +10,8 @@ import uuid
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
+import tempfile
+import shutil
 
 # ==================== CONFIG & GLOBALS ====================
 VISIT_TIMEOUT_SECONDS = 180
@@ -18,6 +20,11 @@ STOP_FLAG = False
 def set_stop_flag(value: bool):
     global STOP_FLAG
     STOP_FLAG = value
+
+
+def get_unique_profile(visit_id: int) -> str:
+    """Every visit gets its own clean profile — fixes parallel runs"""
+    return tempfile.mkdtemp(prefix=f"sb_yandex_{visit_id}_{os.getpid()}_")
 
 def diminish():
     """Decrement queue in data.json (only on confirmed success)"""
@@ -33,19 +40,34 @@ def diminish():
     except Exception as e:
         print(f"[DIMINISH] Error: {e}")
 
-def cleanup_chrome():
-    """Kill stray Chrome processes safely"""
+def cleanup_chrome(aggressive: bool = False):
+    """Safe, surgical cleanup — only touches this script's browsers"""
+    killed = 0
     try:
         current = psutil.Process(os.getpid())
         for child in current.children(recursive=True):
             try:
                 name = child.name().lower()
-                if "chrome" in name or "chromedriver" in name:
-                    child.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                cmd = ' '.join(child.cmdline()).lower()
+                if any(x in name for x in ["chrome", "chromedriver"]) and \
+                   any(x in cmd for x in ["selenium", "undetected", "--remote-debugging-port"]):
+                    print(f"[CLEANUP] Killing {child.pid} ({name})")
+                    if not aggressive:
+                        child.terminate()
+                        time.sleep(0.8)
+                        if child.is_running():
+                            child.kill()
+                    else:
+                        child.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
+    except Exception as e:
+        print(f"[CLEANUP] Error: {e}")
+    
+    if killed > 0:
+        time.sleep(1.5)  # critical: let OS release ports
+    return killed
 
 # ==================== PROXY HANDLING ====================
 from tokens import *
@@ -160,20 +182,27 @@ def simulate_human_behavior(sb, visit_id: int, min_duration: int = 10):
 
 # ==================== CORE VISIT LOGIC ====================
 def visit_with_timeout(proxy: dict, target: str, visit_id: int) -> bool:
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(visit_with_proxy, proxy, target, visit_id)
-        try:
-            return future.result(timeout=VISIT_TIMEOUT_SECONDS)
-        except Exception as e:
-            print(f"[{visit_id}] ⏰ TIMEOUT/CRITICAL — cleaning up")
-            cleanup_chrome()
-            return False
+    """Simple, safe timeout — no threads, no races"""
+    start = time.time()
+    try:
+        return visit_with_proxy(proxy, target, visit_id)
+    except Exception as e:
+        print(f"[{visit_id}] ⏰ CRITICAL ERROR: {e}")
+        cleanup_chrome(aggressive=True)
+        return False
+    finally:
+        elapsed = time.time() - start
+        if elapsed > VISIT_TIMEOUT_SECONDS:
+            print(f"[{visit_id}] ⏰ Visit exceeded {VISIT_TIMEOUT_SECONDS}s — aggressive cleanup")
+            cleanup_chrome(aggressive=True)
 
 def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     proxy_str = get_proxy_string(proxy)
     is_success = False
 
     try:
+        profile_dir = get_unique_profile(visit_id)   # ← NEW (this is the most important line)
+        print(f"[{visit_id}] 🌐 Using unique profile: {profile_dir}")
         with SB(
             uc=True,
             proxy=proxy_str,
@@ -181,6 +210,7 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
             page_load_strategy="normal",
             test=True,
             incognito=True,
+            user_data_dir=profile_dir,
             maximize=True
         ) as sb:
             if STOP_FLAG:
@@ -275,10 +305,15 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
 
     except Exception as e:
         print(f"[{visit_id}] CRITICAL ERROR: {e}")
-        cleanup_chrome()
         return False
-
-    cleanup_chrome()
+    finally:                                      # ← NEW (guarantees cleanup)
+        if profile_dir and os.path.exists(profile_dir):
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except:
+                pass
+        cleanup_chrome()                          # ← NEW
+    
     return is_success
 
 
