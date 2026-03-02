@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import tempfile
 import shutil
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import threading
 
 # ==================== CONFIG & GLOBALS ====================
 VISIT_TIMEOUT_SECONDS = 180
@@ -68,6 +69,27 @@ def cleanup_chrome(aggressive: bool = False):
     if killed > 0:
         time.sleep(1.8) # give OS time to release ports
     return killed
+
+
+def nuclear_cleanup(visit_id: int):
+    """Kills any stubborn Chrome processes tied to this exact visit (prevents hangs)"""
+    try:
+        current = psutil.Process(os.getpid())
+        profile_pattern = f"sb_yandex_{visit_id}_"
+        killed = 0
+        for child in current.children(recursive=True):
+            try:
+                cmd = ' '.join(child.cmdline()).lower()
+                if profile_pattern in cmd or "sb_yandex" in cmd:
+                    print(f"[NUCLEAR] Killing stubborn Chrome {child.pid} for visit {visit_id}")
+                    child.kill()
+                    killed += 1
+            except:
+                pass
+        if killed > 0:
+            time.sleep(2.5)
+    except Exception as e:
+        print(f"[NUCLEAR] Error: {e}")
 # ==================== PROXY HANDLING ====================
 from tokens import *
 
@@ -181,29 +203,31 @@ def simulate_human_behavior(sb, visit_id: int, min_duration: int = 10):
 
 # ==================== CORE VISIT LOGIC ====================
 def visit_with_timeout(proxy: dict, target: str, visit_id: int) -> bool:
-    """HARD timeout using thread — this is the fix for freezing"""
+    """Daemon thread + nuclear cleanup — this version CANNOT hang the main bot"""
+    result = [False]
+
     def worker():
-        return visit_with_proxy(proxy, target, visit_id)
-
-    print(f"[{visit_id}] ⏳ Starting visit with HARD {VISIT_TIMEOUT_SECONDS}s timeout")
-    start = time.time()
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(worker)
         try:
-            result = future.result(timeout=VISIT_TIMEOUT_SECONDS + 5)  # small buffer
-            return result
-        except FuturesTimeoutError:
-            print(f"[{visit_id}] ⏰ HARD TIMEOUT — killing browser")
-            cleanup_chrome(aggressive=True)
-            time.sleep(2.2)
-            return False
+            result[0] = visit_with_proxy(proxy, target, visit_id)
         except Exception as e:
-            print(f"[{visit_id}] CRITICAL worker error: {e}")
-            cleanup_chrome(aggressive=True)
-            return False
-    # No finally needed here — cleanup is inside worker + on timeout
+            print(f"[{visit_id}] Worker crashed: {e}")
+            result[0] = False
 
+    print(f"[{visit_id}] ⏳ Starting visit with HARD {VISIT_TIMEOUT_SECONDS}s timeout (daemon mode)")
+    
+    thread = threading.Thread(target=worker, daemon=True)  # ← daemon = auto-abandon
+    thread.start()
+    
+    thread.join(timeout=VISIT_TIMEOUT_SECONDS + 18)  # +18 buffer
+    
+    if thread.is_alive():
+        print(f"[{visit_id}] ⏰ HARD TIMEOUT — Nuclear cleanup activated")
+        cleanup_chrome(aggressive=True)
+        nuclear_cleanup(visit_id)
+        time.sleep(3.8)          # critical for xvfb + Linux port release
+        return False
+    
+    return result[0]
 
 def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     proxy_str = get_proxy_string(proxy)
@@ -321,14 +345,23 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     except Exception as e:
         print(f"[{visit_id}] CRITICAL ERROR: {e}")
         return False
-    finally:                                      # ← NEW (guarantees cleanup)
+    finally:
+        # Safe driver shutdown — prevents shutdown hangs on UC mode
+        if 'sb' in locals():
+            try:
+                if hasattr(sb, 'driver') and sb.driver is not None:
+                    sb.driver.close()
+                    sb.driver.quit()
+            except:
+                pass
         if profile_dir and os.path.exists(profile_dir):
             try:
                 shutil.rmtree(profile_dir, ignore_errors=True)
             except:
                 pass
-        cleanup_chrome()                          # ← NEW
-    
+        cleanup_chrome(aggressive=True)
+        time.sleep(1.2)
+
     return is_success
 
 
