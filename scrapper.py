@@ -8,10 +8,10 @@ import json
 from datetime import datetime
 import uuid
 import psutil
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 import tempfile
 import shutil
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # ==================== CONFIG & GLOBALS ====================
 VISIT_TIMEOUT_SECONDS = 180
@@ -41,7 +41,7 @@ def diminish():
         print(f"[DIMINISH] Error: {e}")
 
 def cleanup_chrome(aggressive: bool = False):
-    """Safe, surgical cleanup — only touches this script's browsers"""
+    """Safe, surgical cleanup — now also catches your sb_yandex temp profiles"""
     killed = 0
     try:
         current = psutil.Process(os.getpid())
@@ -50,11 +50,12 @@ def cleanup_chrome(aggressive: bool = False):
                 name = child.name().lower()
                 cmd = ' '.join(child.cmdline()).lower()
                 if any(x in name for x in ["chrome", "chromedriver"]) and \
-                   any(x in cmd for x in ["selenium", "undetected", "--remote-debugging-port"]):
+                   (any(x in cmd for x in ["selenium", "undetected", "--remote-debugging-port"]) or
+                    "sb_yandex" in cmd):
                     print(f"[CLEANUP] Killing {child.pid} ({name})")
                     if not aggressive:
                         child.terminate()
-                        time.sleep(0.8)
+                        time.sleep(0.6)
                         if child.is_running():
                             child.kill()
                     else:
@@ -64,11 +65,9 @@ def cleanup_chrome(aggressive: bool = False):
                 pass
     except Exception as e:
         print(f"[CLEANUP] Error: {e}")
-    
     if killed > 0:
-        time.sleep(1.5)  # critical: let OS release ports
+        time.sleep(1.8) # give OS time to release ports
     return killed
-
 # ==================== PROXY HANDLING ====================
 from tokens import *
 
@@ -182,23 +181,34 @@ def simulate_human_behavior(sb, visit_id: int, min_duration: int = 10):
 
 # ==================== CORE VISIT LOGIC ====================
 def visit_with_timeout(proxy: dict, target: str, visit_id: int) -> bool:
-    """Simple, safe timeout — no threads, no races"""
-    start = time.time()
-    try:
+    """HARD timeout using thread — this is the fix for freezing"""
+    def worker():
         return visit_with_proxy(proxy, target, visit_id)
-    except Exception as e:
-        print(f"[{visit_id}] ⏰ CRITICAL ERROR: {e}")
-        cleanup_chrome(aggressive=True)
-        return False
-    finally:
-        elapsed = time.time() - start
-        if elapsed > VISIT_TIMEOUT_SECONDS:
-            print(f"[{visit_id}] ⏰ Visit exceeded {VISIT_TIMEOUT_SECONDS}s — aggressive cleanup")
+
+    print(f"[{visit_id}] ⏳ Starting visit with HARD {VISIT_TIMEOUT_SECONDS}s timeout")
+    start = time.time()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker)
+        try:
+            result = future.result(timeout=VISIT_TIMEOUT_SECONDS + 5)  # small buffer
+            return result
+        except FuturesTimeoutError:
+            print(f"[{visit_id}] ⏰ HARD TIMEOUT — killing browser")
             cleanup_chrome(aggressive=True)
+            time.sleep(2.2)
+            return False
+        except Exception as e:
+            print(f"[{visit_id}] CRITICAL worker error: {e}")
+            cleanup_chrome(aggressive=True)
+            return False
+    # No finally needed here — cleanup is inside worker + on timeout
+
 
 def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     proxy_str = get_proxy_string(proxy)
     is_success = False
+    profile_dir = None
 
     try:
         profile_dir = get_unique_profile(visit_id)   # ← NEW (this is the most important line)
@@ -229,7 +239,7 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
             except:
                 pass
 
-            sb.driver.set_page_load_timeout(70)
+            sb.driver.set_page_load_timeout(50)
 
             # Anti-detection (UC already strong, we reinforce)
             sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -251,11 +261,16 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
                 return False
 
             # Open target + wait for full load (handles redirects)
-            sb.open(target)
+            try:
+                sb.open(target)
+            except Exception as open_err:
+                print(f"[{visit_id}] Open failed: {open_err}")
+                raise  # let timeout handler catch it   
+
             if STOP_FLAG:
                 return False
 
-            for _ in range(55):
+            for _ in range(50):  # 50s max
                 if STOP_FLAG:
                     return False
                 if sb.execute_script("return document.readyState") == "complete":
@@ -329,7 +344,7 @@ def run_fnc(url: str, visits: int, interval: int, on_process):
         if STOP_FLAG:
             print("🛑 STOP triggered")
             break
-
+        cleanup_chrome()
         start = datetime.now()
         proxy = sticky_proxy()
         success = visit_with_timeout(proxy, url, i + 1)
