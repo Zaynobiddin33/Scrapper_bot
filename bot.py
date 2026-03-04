@@ -20,15 +20,17 @@ RESTART_FLAG = Path("/tmp/bot_restarting")
 
 def authorized(func):
     async def wrapper(msg_or_cb, *args, **kwargs):
-        # Get username safely
-        username = getattr(msg_or_cb.from_user, "username", None)
-        if username not in AUTHORIZED_USERNAMES:
+        # Get user ID safely
+        user_id = getattr(msg_or_cb.from_user, "id", None)
+
+        if user_id not in AUTHORIZED_USER_IDS:
             if isinstance(msg_or_cb, types.Message):
                 await msg_or_cb.answer("Siz bu botni ishlata olmaysiz ❌")
             elif isinstance(msg_or_cb, types.CallbackQuery):
                 await msg_or_cb.answer("Siz bu botni ishlata olmaysiz ❌", show_alert=True)
             return
-        # Call original handler safely, ignore extra kwargs
+
+        # Call original handler safely
         return await func(msg_or_cb, *args)
     return wrapper
 
