@@ -169,7 +169,7 @@ async def start(msg: types.Message):
 
 @dp.message(lambda m: m.text == "➕ Link Qo'shish")
 async def add_url(msg: types.Message, state: FSMContext):
-    if msg.from_user.username in AUTHORIZED_USERNAMES:
+    if msg.from_user.id in AUTHORIZED_USER_IDS:
         await msg.answer("Link yuboring:")
         await state.set_state(AddURL.url)
     else:
@@ -223,7 +223,7 @@ async def get_interval(msg: types.Message, state: FSMContext):
 
 @dp.message(AddURL.url)
 async def get_url(msg: types.Message, state: FSMContext):
-    if msg.from_user.username in AUTHORIZED_USERNAMES:
+    if msg.from_user.id in AUTHORIZED_USER_IDS:
         await state.update_data(url=msg.text)
         await msg.answer("Bu link'ga necha marta kirilsin?")
         await state.set_state(AddURL.times)
