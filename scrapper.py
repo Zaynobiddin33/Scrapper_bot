@@ -2,21 +2,40 @@ from seleniumbase import SB
 import time
 import random
 import os
-import sys
-import requests
 import json
+import math
 from datetime import datetime
+from contextlib import contextmanager
 import uuid
 import psutil
 from urllib.parse import urlparse
 import tempfile
 import shutil
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import threading
 
 # ==================== CONFIG & GLOBALS ====================
-VISIT_TIMEOUT_SECONDS = 180
+VISIT_TIMEOUT_SECONDS = 120  # tighter timeout since visits are faster now
 STOP_FLAG = False
+
+
+@contextmanager
+def step_timer(visit_id: int, step_name: str):
+    """Log how long each pipeline step takes"""
+    t0 = time.time()
+    print(f"[{visit_id}] ▶ {step_name}...")
+    try:
+        yield
+    finally:
+        elapsed = time.time() - t0
+        print(f"[{visit_id}] ✔ {step_name} — {elapsed:.1f}s")
+
+
+# Realistic viewport sizes (common desktop resolutions)
+VIEWPORTS = [
+    (1920, 1080), (1366, 768), (1536, 864), (1440, 900),
+    (1280, 720), (1600, 900), (1280, 800), (1680, 1050),
+]
+
 
 def set_stop_flag(value: bool):
     global STOP_FLAG
@@ -24,11 +43,10 @@ def set_stop_flag(value: bool):
 
 
 def get_unique_profile(visit_id: int) -> str:
-    """Every visit gets its own clean profile — fixes parallel runs"""
     return tempfile.mkdtemp(prefix=f"sb_yandex_{visit_id}_{os.getpid()}_")
 
+
 def diminish():
-    """Decrement queue in data.json (only on confirmed success)"""
     try:
         with open('data.json', 'r') as f:
             data = json.load(f)
@@ -41,8 +59,8 @@ def diminish():
     except Exception as e:
         print(f"[DIMINISH] Error: {e}")
 
+
 def cleanup_chrome(aggressive: bool = False):
-    """Safe, surgical cleanup — now also catches your sb_yandex temp profiles"""
     killed = 0
     try:
         current = psutil.Process(os.getpid())
@@ -53,45 +71,42 @@ def cleanup_chrome(aggressive: bool = False):
                 if any(x in name for x in ["chrome", "chromedriver"]) and \
                    (any(x in cmd for x in ["selenium", "undetected", "--remote-debugging-port"]) or
                     "sb_yandex" in cmd):
-                    print(f"[CLEANUP] Killing {child.pid} ({name})")
-                    if not aggressive:
+                    if aggressive:
+                        child.kill()
+                    else:
                         child.terminate()
-                        time.sleep(0.6)
+                        time.sleep(0.3)
                         if child.is_running():
                             child.kill()
-                    else:
-                        child.kill()
                     killed += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
     except Exception as e:
         print(f"[CLEANUP] Error: {e}")
     if killed > 0:
-        time.sleep(1.8) # give OS time to release ports
+        time.sleep(1)
     return killed
 
 
 def nuclear_cleanup(visit_id: int):
-    """Kills any stubborn Chrome processes tied to this exact visit (prevents hangs)"""
     try:
         current = psutil.Process(os.getpid())
         profile_pattern = f"sb_yandex_{visit_id}_"
-        killed = 0
         for child in current.children(recursive=True):
             try:
                 cmd = ' '.join(child.cmdline()).lower()
                 if profile_pattern in cmd or "sb_yandex" in cmd:
-                    print(f"[NUCLEAR] Killing stubborn Chrome {child.pid} for visit {visit_id}")
                     child.kill()
-                    killed += 1
             except:
                 pass
-        if killed > 0:
-            time.sleep(2.5)
-    except Exception as e:
-        print(f"[NUCLEAR] Error: {e}")
+        time.sleep(1)
+    except Exception:
+        pass
+
+
 # ==================== PROXY HANDLING ====================
 from tokens import *
+
 
 def sticky_proxy() -> dict:
     session_id = uuid.uuid4().hex[:12]
@@ -102,108 +117,259 @@ def sticky_proxy() -> dict:
         "password": PASSWORD,
     }
 
+
 def get_proxy_string(proxy: dict) -> str:
     return f"{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
 
-# ==================== SAFE JS EXECUTION (fixes CDP "Illegal return statement") ====================
-def safe_execute_script(sb, script: str):
-    """Wraps any script in IIFE to prevent 'Illegal return statement' in SeleniumBase UC/CDP mode"""
-    wrapped = f"""
-    (function() {{
-        try {{
-            return ({script});
-        }} catch(e) {{
-            console.error('SafeJS error:', e);
-            return false;
-        }}
-    }})();
-    """
-    return sb.execute_script(wrapped)
 
-# ==================== ADVANCED HUMAN SIMULATION (Yandex Metrica behavioral core) ====================
-def simulate_human_behavior(sb, visit_id: int, min_duration: int = 10):
+# ==================== BEZIER CURVE MOUSE TRAJECTORY ====================
+def bezier_point(t, p0, p1, p2, p3):
+    u = 1 - t
+    return (
+        u**3 * p0[0] + 3 * u**2 * t * p1[0] + 3 * u * t**2 * p2[0] + t**3 * p3[0],
+        u**3 * p0[1] + 3 * u**2 * t * p1[1] + 3 * u * t**2 * p2[1] + t**3 * p3[1],
+    )
+
+
+def generate_mouse_path(start_x, start_y, end_x, end_y, steps=None):
+    """Bezier curve mouse path -- fewer steps for speed, still natural"""
+    distance = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+    if steps is None:
+        steps = max(5, min(18, int(distance / 50)))  # fewer steps = faster
+
+    offset = distance * 0.25
+    cp1 = (
+        start_x + (end_x - start_x) * 0.25 + random.uniform(-offset, offset),
+        start_y + (end_y - start_y) * 0.25 + random.uniform(-offset, offset),
+    )
+    cp2 = (
+        start_x + (end_x - start_x) * 0.75 + random.uniform(-offset, offset),
+        start_y + (end_y - start_y) * 0.75 + random.uniform(-offset, offset),
+    )
+
+    path = []
+    for i in range(steps + 1):
+        t = i / steps
+        t = t * t * (3 - 2 * t)  # ease-in-out
+        x, y = bezier_point(t, (start_x, start_y), cp1, cp2, (end_x, end_y))
+        x += random.gauss(0, 0.6)
+        y += random.gauss(0, 0.6)
+        path.append((max(0, x), max(0, y)))
+    return path
+
+
+# ==================== CDP TRUSTED INPUT (isTrusted: true) ====================
+
+def cdp_move_mouse(sb, x, y):
+    sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseMoved", "x": int(x), "y": int(y),
+    })
+
+
+def cdp_click(sb, x, y, button="left"):
+    sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mousePressed", "x": int(x), "y": int(y),
+        "button": button, "clickCount": 1,
+    })
+    time.sleep(random.uniform(0.04, 0.10))
+    sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseReleased", "x": int(x), "y": int(y),
+        "button": button, "clickCount": 1,
+    })
+
+
+def cdp_scroll(sb, x, y, delta_y):
+    sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseWheel", "x": int(x), "y": int(y),
+        "deltaX": 0, "deltaY": delta_y,
+    })
+
+
+def cdp_move_along_path(sb, path, base_delay=0.008):
+    """Move mouse along path -- optimized: smaller delays"""
+    for i, (x, y) in enumerate(path):
+        if STOP_FLAG:
+            return
+        cdp_move_mouse(sb, x, y)
+        progress = i / max(len(path) - 1, 1)
+        speed = 0.5 + 1.5 * math.sin(progress * math.pi)
+        time.sleep(base_delay / max(speed, 0.3) + random.uniform(0, 0.004))
+
+
+# ==================== OPTIMIZED HUMAN BEHAVIOR ====================
+def simulate_human_behavior(sb, visit_id: int, min_duration: int = 15):
     """
-    100% JS behavioral simulation — designed specifically against Yandex Metrica robot filter (2026).
-    Metrica detects bots by:
-    - Lack of mouse entropy / movement patterns
-    - No variable scrolling
-    - No real interaction events
-    - <15s active session
-    This fires real mousemove, mousedown, mouseup, scroll, focus events with natural randomness.
+    CDP-based simulation: isTrusted:true events only.
+    Optimized: fewer element re-queries, tighter sleeps, same quality signals.
     """
-    print(f"[{visit_id}] 🚀 Starting ADVANCED HUMAN BEHAVIOR simulation ({min_duration}-{min_duration+10}s)...")
     start = time.time()
-    target_duration = random.randint(min_duration, min_duration + 10)
-
-    js_script = """
-    (function() {
-        const w = window.innerWidth || 1200;
-        const h = window.innerHeight || 800;
-        let elapsed = 0;
-        const targetMs = Math.floor(Math.random() * 22000) + """ + str(min_duration * 1000) + """;
-
-        function dispatchMouse() {
-            const ev = new MouseEvent('mousemove', {
-                bubbles: true, cancelable: true,
-                clientX: Math.random() * w,
-                clientY: Math.random() * h,
-                movementX: Math.random() * 48 - 24,
-                movementY: Math.random() * 36 - 18
-            });
-            document.documentElement.dispatchEvent(ev);
-        }
-
-        function dispatchClick() {
-            const x = Math.random() * w;
-            const y = Math.random() * h * 0.7;
-            const down = new MouseEvent('mousedown', {bubbles: true, clientX: x, clientY: y});
-            const up = new MouseEvent('mouseup', {bubbles: true, clientX: x, clientY: y});
-            document.documentElement.dispatchEvent(down);
-            document.documentElement.dispatchEvent(up);
-        }
-
-        function randomScroll() {
-            const amount = Math.random() * 680 + 120;
-            window.scrollBy(0, Math.random() > 0.5 ? amount : -amount);
-        }
-
-        const interval = setInterval(() => {
-            elapsed += 380;
-            if (elapsed >= targetMs) {
-                clearInterval(interval);
-                window.scrollTo(0, document.body.scrollHeight * (Math.random() * 0.75 + 0.18));
-                window.focus();
-                return;
-            }
-            if (Math.random() < 0.82) dispatchMouse();
-            if (Math.random() < 0.38) randomScroll();
-            if (Math.random() < 0.19) dispatchClick();   // Safe fake clicks (boosts interaction score)
-        }, 380);
-    })();
-    """
+    target_duration = random.uniform(min_duration, min_duration + 8)
 
     try:
-        sb.execute_script(js_script)
-        # Keep Python thread alive while JS runs + add natural pauses
-        while time.time() - start < target_duration:
-            if STOP_FLAG:
-                return
-            time.sleep(0.38)
-    except Exception as e:
-        print(f"[{visit_id}] JS behavior fallback: {e}")
-        # Ultra-safe fallback
-        for _ in range(8):
-            if STOP_FLAG:
-                return
-            sb.execute_script("window.scrollBy(0, 240 + Math.random()*300);")
-            time.sleep(random.uniform(1.1, 2.4))
+        vw = sb.execute_script("return window.innerWidth") or 1200
+        vh = sb.execute_script("return window.innerHeight") or 800
+    except:
+        vw, vh = 1200, 800
 
-    print(f"[{visit_id}] ✅ Advanced human simulation completed ({int(time.time()-start)}s active)")
+    cur_x = random.uniform(vw * 0.2, vw * 0.6)
+    cur_y = random.uniform(vh * 0.2, vh * 0.5)
+    cdp_move_mouse(sb, cur_x, cur_y)
+
+    # Get visible elements ONCE (avoid repeated DOM queries)
+    elements = []
+    try:
+        elements = sb.execute_script("""
+            return Array.from(document.querySelectorAll(
+                'a, button, p, h1, h2, h3, img'
+            )).slice(0, 20).map(el => {
+                const r = el.getBoundingClientRect();
+                return {
+                    x: r.left + r.width/2, y: r.top + r.height/2,
+                    w: r.width, h: r.height,
+                    visible: r.width > 0 && r.height > 0 && r.top < window.innerHeight
+                };
+            }).filter(e => e.visible && e.w > 10 && e.h > 10);
+        """) or []
+    except:
+        pass
+
+    actions = 0
+    scroll_total = 0
+    last_element_refresh = time.time()
+
+    while time.time() - start < target_duration:
+        if STOP_FLAG:
+            return
+
+        action = random.choices(
+            ["move", "scroll_down", "scroll_up", "read", "random"],
+            weights=[28, 28, 8, 22, 14], k=1
+        )[0]
+
+        try:
+            if action == "move" and elements:
+                el = random.choice(elements)
+                tx = max(5, min(el['x'] + random.uniform(-10, 10), vw - 5))
+                ty = max(5, min(el['y'] + random.uniform(-10, 10), vh - 5))
+                path = generate_mouse_path(cur_x, cur_y, tx, ty)
+                cdp_move_along_path(sb, path)
+                cur_x, cur_y = tx, ty
+                time.sleep(random.uniform(0.15, 0.8))
+
+            elif action == "scroll_down":
+                amount = random.randint(100, 350)
+                # 2-3 incremental scrolls (natural wheel ticks)
+                for _ in range(random.randint(2, 3)):
+                    if STOP_FLAG: return
+                    cdp_scroll(sb, cur_x, cur_y, amount // 3)
+                    time.sleep(random.uniform(0.02, 0.05))
+                scroll_total += amount
+                time.sleep(random.uniform(0.2, 0.5))
+
+                # Refresh elements every ~6s after scrolling (not every scroll)
+                if time.time() - last_element_refresh > 6:
+                    try:
+                        elements = sb.execute_script("""
+                            return Array.from(document.querySelectorAll(
+                                'a, button, p, h1, h2, h3, img'
+                            )).slice(0, 20).map(el => {
+                                const r = el.getBoundingClientRect();
+                                return {
+                                    x: r.left + r.width/2, y: r.top + r.height/2,
+                                    w: r.width, h: r.height,
+                                    visible: r.width > 0 && r.height > 0
+                                        && r.top > -50 && r.top < window.innerHeight + 50
+                                };
+                            }).filter(e => e.visible && e.w > 10 && e.h > 10);
+                        """) or elements
+                        last_element_refresh = time.time()
+                    except:
+                        pass
+
+            elif action == "scroll_up" and scroll_total > 200:
+                cdp_scroll(sb, cur_x, cur_y, -random.randint(50, 150))
+                scroll_total -= 100
+                time.sleep(random.uniform(0.15, 0.35))
+
+            elif action == "read":
+                # Micro-jitter (reading) then pause
+                for _ in range(random.randint(2, 4)):
+                    if STOP_FLAG: return
+                    cur_x = max(5, min(cur_x + random.gauss(0, 2), vw - 5))
+                    cur_y = max(5, min(cur_y + random.gauss(0, 2), vh - 5))
+                    cdp_move_mouse(sb, cur_x, cur_y)
+                    time.sleep(random.uniform(0.08, 0.25))
+                time.sleep(random.uniform(0.8, 2.0))
+
+            else:  # random
+                tx = random.uniform(50, vw - 50)
+                ty = random.uniform(50, vh - 50)
+                path = generate_mouse_path(cur_x, cur_y, tx, ty)
+                cdp_move_along_path(sb, path)
+                cur_x, cur_y = tx, ty
+                time.sleep(random.uniform(0.1, 0.3))
+
+            actions += 1
+        except:
+            time.sleep(0.2)
+
+    elapsed = time.time() - start
+    print(f"[{visit_id}] Behavior: {elapsed:.0f}s, {actions} actions, {scroll_total}px scrolled")
+
+
+# ==================== METRICA HELPERS ====================
+def wait_for_metrica(sb, visit_id: int, timeout: int = 10) -> bool:
+    """Wait for Metrica -- reduced timeout, faster polling"""
+    start = time.time()
+    while time.time() - start < timeout:
+        if STOP_FLAG:
+            return False
+        try:
+            loaded = sb.execute_script("""
+                return typeof window.ym === 'function'
+                    || !!document.querySelector('script[src*="metrika"], script[src*="mc.yandex"]')
+                    || performance.getEntriesByType('resource').some(
+                        r => r.name.includes('mc.yandex') || r.name.includes('metrika')
+                    );
+            """)
+            if loaded:
+                print(f"[{visit_id}]   Metrica ready ({time.time()-start:.1f}s)")
+                return True
+        except:
+            pass
+        time.sleep(0.5)  # poll every 0.5s instead of 1s
+    print(f"[{visit_id}]   Metrica not detected after {timeout}s")
+    return False
+
+
+def verify_metrica_beacon(sb, visit_id: int) -> bool:
+    """Quick check for Metrica beacon"""
+    try:
+        result = sb.execute_script("""
+            return (function() {
+                var e = performance.getEntriesByType('resource');
+                for (var i = 0; i < e.length; i++) {
+                    if (e[i].name.indexOf('/watch') !== -1 &&
+                        (e[i].name.indexOf('mc.yandex') !== -1)) return 'beacon';
+                }
+                if (typeof window.Ya !== 'undefined' && window.Ya._metrika &&
+                    window.Ya._metrika.counters &&
+                    Object.keys(window.Ya._metrika.counters).length > 0) return 'counter';
+                if (typeof window.ym === 'function') return 'ym';
+                return '';
+            })();
+        """)
+        if result:
+            print(f"[{visit_id}]   Metrica verified: {result}")
+            return True
+    except:
+        pass
+    print(f"[{visit_id}]   Metrica beacon unconfirmed")
+    return False
 
 
 # ==================== CORE VISIT LOGIC ====================
 def visit_with_timeout(proxy: dict, target: str, visit_id: int) -> bool:
-    """Daemon thread + nuclear cleanup — this version CANNOT hang the main bot"""
     result = [False]
 
     def worker():
@@ -213,21 +379,19 @@ def visit_with_timeout(proxy: dict, target: str, visit_id: int) -> bool:
             print(f"[{visit_id}] Worker crashed: {e}")
             result[0] = False
 
-    print(f"[{visit_id}] ⏳ Starting visit with HARD {VISIT_TIMEOUT_SECONDS}s timeout (daemon mode)")
-    
-    thread = threading.Thread(target=worker, daemon=True)  # ← daemon = auto-abandon
+    thread = threading.Thread(target=worker, daemon=True)
     thread.start()
-    
-    thread.join(timeout=VISIT_TIMEOUT_SECONDS + 18)  # +18 buffer
-    
+    thread.join(timeout=VISIT_TIMEOUT_SECONDS)
+
     if thread.is_alive():
-        print(f"[{visit_id}] ⏰ HARD TIMEOUT — Nuclear cleanup activated")
+        print(f"[{visit_id}] TIMEOUT — killing")
         cleanup_chrome(aggressive=True)
         nuclear_cleanup(visit_id)
-        time.sleep(3.8)          # critical for xvfb + Linux port release
+        time.sleep(2)
         return False
-    
+
     return result[0]
+
 
 def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     proxy_str = get_proxy_string(proxy)
@@ -235,8 +399,12 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
     profile_dir = None
 
     try:
-        profile_dir = get_unique_profile(visit_id)   # ← NEW (this is the most important line)
-        print(f"[{visit_id}] 🌐 Using unique profile: {profile_dir}")
+        profile_dir = get_unique_profile(visit_id)
+        vw, vh = random.choice(VIEWPORTS)
+        domain = urlparse(target).netloc.replace("www.", "")
+
+        visit_t0 = time.time()
+
         with SB(
             uc=True,
             proxy=proxy_str,
@@ -245,122 +413,140 @@ def visit_with_proxy(proxy: dict, target: str, visit_id: int) -> bool:
             test=True,
             incognito=True,
             user_data_dir=profile_dir,
-            maximize=True
         ) as sb:
-            if STOP_FLAG:
-                return False
-
-            print(f"[{visit_id}] 🌐 Using sticky proxy session")
-
-            # Proxy validation
-            prox_dict = {
-                "http": f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}",
-                "https": f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}",
-            }
-            try:
-                ip_resp = requests.get("https://api.ipify.org?format=json", proxies=prox_dict, timeout=8)
-                print(f"[{visit_id}] Proxy IP: {ip_resp.json().get('ip')}")
-            except:
-                pass
-
-            sb.driver.set_page_load_timeout(50)
-
-            # Anti-detection (UC already strong, we reinforce)
-            sb.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            sb.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
-                "headers": {
-                    "Referer": "https://yandex.uz/",
-                    "Accept-Language": "uz-UZ,uz;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6,en;q=0.5"
-                }
-            })
-
-            # Fake referrer for Yandex ecosystem trust
-            try:
-                sb.activate_cdp_mode("https://yandex.uz")
-                time.sleep(2.8)
-            except:
-                pass
+            print(f"[{visit_id}] Browser launched — {time.time() - visit_t0:.1f}s")
 
             if STOP_FLAG:
                 return False
 
-            # Open target + wait for full load (handles redirects)
-            try:
-                sb.open(target)
-            except Exception as open_err:
-                print(f"[{visit_id}] Open failed: {open_err}")
-                raise  # let timeout handler catch it   
+            # ---- STEP 0: Quick browser config ----
+            with step_timer(visit_id, "Config"):
+                try:
+                    sb.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                        "width": vw, "height": vh,
+                        "deviceScaleFactor": 1, "mobile": False,
+                    })
+                except:
+                    pass
+                sb.driver.set_page_load_timeout(45)
+
+                # Set Referer to Yandex search — this is what Metrica reads as document.referrer
+                # No need to actually visit yandex.uz or the search page
+                sb.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
+                    "headers": {
+                        "Referer": f"https://yandex.uz/search/?text={domain}",
+                        "Accept-Language": "uz-UZ,uz;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6,en;q=0.5"
+                    }
+                })
 
             if STOP_FLAG:
                 return False
 
-            for _ in range(50):  # 50s max
-                if STOP_FLAG:
+            # ---- STEP 1: Open target DIRECTLY (single page load) ----
+            with step_timer(visit_id, "Open target"):
+                try:
+                    sb.open(target)
+                except Exception as e:
+                    print(f"[{visit_id}]   Open failed: {e}")
                     return False
-                if sb.execute_script("return document.readyState") == "complete":
-                    break
-                time.sleep(1)
 
-            # CRITICAL stabilization (prevents CDP connection drops)
-            time.sleep(4.2)
-            sb.execute_script("window.focus();")
+            if STOP_FLAG:
+                return False
 
-            # Metrica detection
-            has_metrica = safe_execute_script(sb,
-                "typeof window.ym === 'function' || !!document.querySelector('script[src*=\"metrika\" i]') || performance.getEntriesByType('resource').some(r => r.name.includes('mc.yandex'))"
-            )
-            print(f"[{visit_id}] Yandex Metrica {'DETECTED ✅' if has_metrica else 'NOT detected ⚠️ (still possible)'}")
+            # ---- STEP 2: Wait for page readyState ----
+            with step_timer(visit_id, "Page ready"):
+                # sb.open() with page_load_strategy="normal" already waits for load
+                # Just verify + short stabilization
+                for _ in range(15):
+                    if STOP_FLAG: return False
+                    try:
+                        if sb.execute_script("return document.readyState") == "complete":
+                            break
+                    except:
+                        pass
+                    time.sleep(0.5)
+                time.sleep(random.uniform(1.0, 2.0))  # brief stabilization
 
-            # Captcha handling
-            try:
-                if sb.is_element_present("iframe[title*='challenge'], iframe[src*='captcha'], iframe[src*='recaptcha']", timeout=8):
-                    print(f"[{visit_id}] Captcha detected → solving")
-                    sb.uc_gui_click_captcha()
-                    time.sleep(2.8)
-            except:
-                pass
-
-            # Landing validation
+            # Quick validation
             current_url = sb.get_current_url()
             page_title = sb.get_page_title().lower()
-            if "404" in page_title or any(k in current_url.lower() for k in ["blocked", "forbidden", "captcha", "error"]):
-                print(f"[{visit_id}] BLOCKED/404 detected")
+            if "404" in page_title or any(k in current_url.lower() for k in ["blocked", "forbidden"]):
+                print(f"[{visit_id}] BLOCKED/404: {current_url}")
                 return False
 
-            # ==================== METRICA COUNT GUARANTEE ====================
-            simulate_human_behavior(sb, visit_id, min_duration=10)
+            # ---- STEP 2b: Captcha (fast check, timeout=2) ----
+            with step_timer(visit_id, "Captcha check"):
+                try:
+                    if sb.is_element_present(
+                        "iframe[title*='challenge'], iframe[src*='captcha'], iframe[src*='recaptcha']",
+                        timeout=2  # was 5 — saves 3s when no captcha
+                    ):
+                        print(f"[{visit_id}]   Captcha! Solving...")
+                        sb.uc_gui_click_captcha()
+                        time.sleep(2)
+                except:
+                    pass
 
-            # Final Metrica network confirmation
-            metrica_confirmed = safe_execute_script(sb,
-                "performance.getEntriesByType('resource').some(r => r.name.includes('mc.yandex.ru') || r.name.includes('yandex.ru/metrika') || r.name.includes('/watch')) || typeof window.ym === 'function'"
-            )
-            if metrica_confirmed:
-                print(f"[{visit_id}] ✅ METRICA HIT CONFIRMED via network + JS")
-            else:
-                print(f"[{visit_id}] ⚠️ No visible Metrica hit (still counts in 90%+ cases after behavior)")
+            if STOP_FLAG:
+                return False
 
-            # Domain validation
-            is_success=True
+            # ---- STEP 3: Wait for Metrica (max 10s) ----
+            with step_timer(visit_id, "Metrica load"):
+                metrica_loaded = wait_for_metrica(sb, visit_id, timeout=10)
+                if metrica_loaded:
+                    time.sleep(random.uniform(0.5, 1.5))
+
+            # Focus window (Metrica cares about tab visibility)
+            try:
+                sb.execute_script("window.focus();")
+            except:
+                pass
+
+            # ---- STEP 4: Human behavior (CDP, 15-23s) ----
+            with step_timer(visit_id, "Human behavior"):
+                simulate_human_behavior(sb, visit_id, min_duration=15)
+
+            if STOP_FLAG:
+                return False
+
+            # ---- STEP 5: Flush Metrica + verify ----
+            with step_timer(visit_id, "Flush + verify"):
+                try:
+                    sb.execute_script("""
+                        if (typeof window.ym === 'function') {
+                            var ids = [];
+                            if (window.Ya && window.Ya._metrika && window.Ya._metrika.counters)
+                                ids = Object.keys(window.Ya._metrika.counters);
+                            ids.forEach(function(id) {
+                                try { window.ym(parseInt(id), 'params', {__ym:{visit:1}}); } catch(e) {}
+                            });
+                        }
+                        document.dispatchEvent(new Event('visibilitychange'));
+                    """)
+                    time.sleep(1)  # was 2
+                except:
+                    pass
+
+                beacon_ok = verify_metrica_beacon(sb, visit_id)
+
+
+            is_success = True
+            total = time.time() - visit_t0
+            status = "CONFIRMED" if beacon_ok else "completed (unconfirmed)"
+            print(f"[{visit_id}] ✅ Visit {status} — total {total:.0f}s")
 
     except Exception as e:
-        print(f"[{visit_id}] CRITICAL ERROR: {e}")
+        print(f"[{visit_id}] ERROR: {e}")
         return False
     finally:
-        # Safe driver shutdown — prevents shutdown hangs on UC mode
-        if 'sb' in locals():
-            try:
-                if hasattr(sb, 'driver') and sb.driver is not None:
-                    sb.driver.close()
-                    sb.driver.quit()
-            except:
-                pass
-        if profile_dir and os.path.exists(profile_dir):
-            try:
-                shutil.rmtree(profile_dir, ignore_errors=True)
-            except:
-                pass
-        cleanup_chrome(aggressive=True)
-        time.sleep(1.2)
+        with step_timer(visit_id, "Cleanup"):
+            if profile_dir and os.path.exists(profile_dir):
+                try:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+                except:
+                    pass
+            cleanup_chrome(aggressive=True)
+            time.sleep(0.5)
 
     return is_success
 
@@ -370,30 +556,49 @@ def run_fnc(url: str, visits: int, interval: int, on_process):
     global STOP_FLAG
     STOP_FLAG = False
     successful_visits = 0
+    consecutive_failures = 0
 
-    print(f"🚀 Starting {visits} visits to {url} (interval {interval}s) — optimized for Yandex Metrica counting")
+    print(f"Starting {visits} visits to {url} (interval {interval}s)")
 
     for i in range(visits):
         if STOP_FLAG:
-            print("🛑 STOP triggered")
+            print("STOP triggered")
             break
+
         cleanup_chrome()
         start = datetime.now()
         proxy = sticky_proxy()
+
         success = visit_with_timeout(proxy, url, i + 1)
+
+        # Retry once on failure with new proxy
+        if not success and not STOP_FLAG:
+            print(f"[{i+1}] Retrying with new proxy...")
+            time.sleep(random.uniform(2, 4))
+            cleanup_chrome(aggressive=True)
+            proxy = sticky_proxy()
+            success = visit_with_timeout(proxy, url, i + 1)
 
         if success:
             successful_visits += 1
+            consecutive_failures = 0
             diminish()
-            print(f"[{i+1}] 🎉 SUCCESS | Total successful: {successful_visits}/{visits}")
+            print(f"[{i+1}] SUCCESS | {successful_visits}/{visits}")
         else:
-            print(f"[{i+1}] ❌ FAILED")
+            consecutive_failures += 1
+            print(f"[{i+1}] FAILED | {successful_visits}/{visits}")
+            if consecutive_failures >= 3:
+                cooldown = random.uniform(10, 20)
+                print(f"[{i+1}] Cooldown {int(cooldown)}s after {consecutive_failures} failures")
+                time.sleep(cooldown)
+                consecutive_failures = 0
 
         on_process(successful_visits, visits)
 
         elapsed = (datetime.now() - start).total_seconds()
         remain = max(0, int(interval - elapsed))
-        print(f"💤 Sleeping {remain}s until next...")
+        remain += random.randint(0, max(1, interval // 5))
+        print(f"Sleeping {remain}s...")
 
         for _ in range(remain):
             if STOP_FLAG:
@@ -402,7 +607,7 @@ def run_fnc(url: str, visits: int, interval: int, on_process):
             time.sleep(1)
 
         if (i + 1) % 3 == 0:
-            cleanup_chrome()
+            cleanup_chrome(aggressive=True)
 
-    cleanup_chrome()
-    print(f"🏁 Run finished. Successful visits: {successful_visits}/{visits}")
+    cleanup_chrome(aggressive=True)
+    print(f"Done. {successful_visits}/{visits} successful")
